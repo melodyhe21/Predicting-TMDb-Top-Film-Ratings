@@ -1,0 +1,956 @@
+---
+title: "STAT410_MovieRating"
+output: pdf_document
+date: "2023-04-04"
+---
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, include = FALSE}
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(stats)
+library(leaps)
+library(jtools)
+library(car)
+library(magrittr)
+library(kableExtra)
+library(knitr)
+library(ggrepel)
+library(tinytex)
+
+setwd("C:\\Users\\melod\\STAT_410_Final")
+movies <- read.csv("tmdb_5000_movies.csv")
+credits <- read.csv("tmdb_5000_credits.csv")
+```
+
+## CLEANING DATA
+```{r, echo = FALSE}
+# Function for cleaning data with incorrectly formatted variables
+clean_data <- function(var) {
+  var <- gsub("\\[", "", var) # delete left bracket
+  var <- gsub("\\]", "", var) # delete right bracket
+  var <- gsub("\\{", "", var) # delete all left curly braces
+  var <- gsub("\\}", "", var) # delete all right curly braces
+  var <- gsub("\"", "", var) # delete quotation marks in string
+  var <- gsub("id:", "", var) 
+  var <- gsub("name: ", "", var)
+  var <- gsub("[0-9]", "", var) # delete all numeric characters
+  
+  return(var)
+}
+```
+
+```{r}
+# Clean genre variable
+movies$genres <- clean_data(movies$genres)
+movies$genres <- gsub(", ", "", movies$genres) # delete commas
+movies$genres <- gsub("  ", " ", movies$genres) # replace two spaces with one
+
+# Clean keyword variable
+movies$keywords <- clean_data(movies$keywords)
+movies$keywords <- gsub(", ", "", movies$keywords)
+movies$keywords <- gsub("  ", " ", movies$keywords)
+
+# Clean production companies variable
+movies$production_companies <- clean_data(movies$production_companies)
+movies$production_companies <- gsub(" ,", "", movies$production_companies)
+movies$production_companies <- gsub("  ", " ", movies$production_companies)
+
+movies$production_companies <- clean_data(movies$production_companies)
+movies$production_companies <- gsub(",  ", "", movies$production_companies)
+movies$production_companies1 <- str_split(movies$production_companies, ", ")
+movies %>% relocate(production_companies1, .after = production_companies) -> movies
+
+# Clean spoken languages variable
+movies$spoken_languages <- clean_data(movies$spoken_languages)
+spoken_languages <- strsplit(movies$spoken_languages, ",")
+spoken_languages <- lapply(spoken_languages, function(x) x[!grepl("iso", x)])
+spoken_languages <- sapply(spoken_languages, function(x) paste(x, collapse = " "))
+movies$spoken_languages <- gsub("^\\s+", "", spoken_languages) # delete whitespace at beginning of string
+```
+
+```{r, echo = FALSE}
+ # Filter movies with vote count over 900
+movies <- movies[movies$vote_count >= 900,]
+# Scale revenue and budget by dividing by 1000000
+movies$revenue <- movies$revenue/(10^6) 
+movies$budget <- movies$budget/(10^6)
+# Filter movies with revenue and budget greater than 0
+movies <- movies[movies$revenue > 0 & movies$budget > 0,]
+
+# Create year variable
+movies$year <- as.numeric(substring(movies$release_date, 1, 4))
+# Filter for movies with release year greater than 1990
+movies <- movies[movies$year >= 1990,]
+# Create month variable
+movies$release_month <- substr(movies$release_date, 6, 7)
+movies$release_month <- sapply(movies$release_month, FUN = function(mo){
+  if(mo == "01"){mo <- "January"}
+  else if(mo == "02"){mo <- "February"}
+  else if(mo == "03"){mo <- "March"}
+  else if(mo == "04"){mo <- "April"}
+  else if(mo == "05"){mo <- "May"}
+  else if(mo == "06"){mo <- "June"}
+  else if(mo == "07"){mo <- "July"}
+  else if(mo == "08"){mo <- "August"}
+  else if(mo == "09"){mo <- "September"}
+  else if(mo == "10"){mo <- "October"}
+  else if(mo == "11"){mo <- "November"}
+  else if(mo == "12"){mo <- "December"}
+})
+movies %>% relocate(release_month, .after = release_date) -> movies
+```
+
+## CATEGORIZING GENRE
+```{r, echo = FALSE}
+# Split genres by space 
+movies$genres1 <- str_split(movies$genres, " ")
+movies %>% relocate(genres1, .after = genres1)
+movies$genres1 <- lapply(movies$genres1, tail, n = -1)
+
+# Categorizing genres 
+movies$genres[grepl("Action", movies$genres1) | grepl("Adventure", movies$genres1)] <- "Action/Adventure"
+movies$genres[grepl("Horror", movies$genres1) & grepl("Thriller", movies$genres1)] <- "Horror/Thriller"
+movies$genres[grepl("Mystery", movies$genres1) | grepl("Thriller", movies$genres1)] <- "Mystery/Thriller"
+movies$genres[grepl("Romance", movies$genres1) | grepl("Comedy", movies$genres1)] <- "Romance/Comedy"
+movies$genres[grepl("Animation", movies$genres1) | grepl("Family", movies$genres1)] <- "Animation/Family"
+movies$genres[grepl("Crime", movies$genres1) & grepl("Thriller", movies$genres1)] <- "Crime/Thriller"
+movies$genres[grepl("History", movies$genres1) & grepl("Drama", movies$genres1)] <- "History/Drama"
+movies$genres[grepl("Adventure", movies$genres1) & grepl("Fantasy", movies$genres1)] <- "Adventure/Fantasy"
+movies$genres[grepl("Thriller", movies$genres1) & grepl("Drama", movies$genres1)] <- "Thriller/Drama"
+movies$genres[grepl("Horror", movies$genres1)] <- "Horror/Thriller"
+movies$genres[grepl("Mystery", movies$genres1)] <- "Mystery/Thriller"
+movies$genres[grepl("Crime", movies$genres1)] <- "Crime/Thriller"
+movies$genres[grepl("Fantasy", movies$genres1)] <- "Adventure/Fantasy"
+
+# If genre has not been categorized, it is categorized into the first genre in the list
+movies$genres[!grepl("/", movies$genres)] <- lapply(movies[!grepl("/", movies$genres),]$genres1, function(x) x[1])
+
+# Combine science fiction into one observation
+movies$genres[movies$genres == "Science" | movies$genres == "Fiction"] <- "Science Fiction"
+movies$genres <- sapply(movies$genres, toString)
+# Remove western and war movies
+movies <- movies[!(movies$genres == "Western"),]
+movies <- movies[!(movies$genres == "War"),]
+
+# Binary encoding for genre regressors
+movies$act_adv <- ifelse(movies$genres == "Action/Adventure", 1, 0)
+movies$adv_fant <- ifelse(movies$genres == "Adventure/Fantasy", 1, 0)
+movies$ani_fam <- ifelse(movies$genres == "Animation/Family", 1, 0)
+movies$crim_thr <- ifelse(movies$genres == "Crime/Thriller", 1, 0)
+movies$drama <- ifelse(movies$genres == "Drama", 1, 0)
+movies$hist_drama <- ifelse(movies$genres == "History/Drama", 1, 0)
+movies$horr_thrill <- ifelse(movies$genres == "Horror/Thriller", 1, 0)
+movies$myst_thrill <- ifelse(movies$genres == "Mystery/Thriller", 1, 0)
+movies$rom_com <- ifelse(movies$genres == "Romance/Comedy", 1, 0)
+movies$sci_fi <- ifelse(movies$genres == "Science Fiction", 1, 0)
+movies$thrill_drama <- ifelse(movies$genres == "Thriller/Drama", 1, 0)
+```
+
+
+## EXPLORATORY DATA VISUALIZATIONS
+```{r, echo = FALSE}
+## VOTE AVERAGE DISTRIBUTION
+avg_hist <- ggplot(movies, aes(x = vote_average)) +
+  geom_histogram(bins = 10, color = "black", fill = "lightblue", lwd = 0.3) + labs(x = "Vote Average (0-10)", y = "Frequency") +
+  ggtitle("Distribution of Average Movie Rating")
+
+## VOTE COUNT DISTRIBUTION
+count_hist <- ggplot(movies, aes(x = vote_count)) +
+  geom_histogram(bins = 20, color = "black", fill = "lightblue", lwd = 0.3) + labs(x = "Vote Count", y = "Frequency") +
+  ggtitle("Distribution of Movie Vote Count")
+
+# Summary statistics for both variables
+min(movies$vote_count)
+max(movies$vote_count)
+mean(movies$vote_count)
+median(movies$vote_count)
+sd(movies$vote_count)
+var(movies$vote_count)
+
+# Create dataframe for vote average by genre from 1990 to 2016
+genres_df <- movies %>%
+  group_by(year, genres)
+
+genres_summary <- genres_df %>% 
+  summarize(vote_avg = mean(vote_average))
+
+genres_summary_sub <- genres_summary[genres_summary$year %in% seq(1990, 2016, by = 3),]
+
+## AVG RATING VS GENRE OVER TIME
+ggplot(genres_summary_sub, aes(x = year, y = vote_avg, group = genres)) +
+  geom_point(aes(color = genres)) +
+  geom_line(aes(color = genres)) +
+  ggtitle("Average Rating by Year") +
+  labs(x = "Year", y = "Vote Average (1-10)")
+
+# Create data frame for most popular keywords
+text <- paste(movies$keywords, collapse = " ")
+words <- unlist(strsplit(text, "\\s+"))
+words_to_remove <- c("the", "on", "duringcreditsstinger", "of", "then", "in", "and", "very", "be", "a", "to", "have", "too", "from", "been", "is", "was", "based", "aftercreditsstinger", "novel", "comic", "d") # remove filler words
+words <- words[!(words %in% words_to_remove)]
+word_freq <- table(words)
+keywords <- names(sort(word_freq, decreasing = TRUE)[1:10])
+
+for (i in 1:10) {
+  movies[[keywords[[i]]]]<- 
+    ifelse(grepl(keywords[i], movies$keywords), 1, 0)
+}
+
+keywords_df <- as.data.frame(sort(word_freq, decreasing = TRUE)[1:10])
+
+## MOST COMMON KEYWORDS
+ggplot(keywords_df, aes(x = words, y = Freq)) +
+  geom_bar(stat = "identity", fill = "lightblue3", color = "black", lwd = 0.3) +
+  ggtitle("Top 10 keywords in All Movies") +
+  labs(x = "Keyword", y = "Frequency")
+
+## PRODUCTION COMPANIES
+
+prodcos <- unique(unlist(movies$production_companies1, recursive = FALSE))
+prodcos <- data.frame(companies = prodcos)
+prodcos <- cbind(prodcos, avg_rating = NA, n_movies = NA, avg_rev = NA, avg_budget = NA)
+
+## AVERAGE RATING
+prodcos$avg_rating <- sapply(prodcos$companies, FUN = function(company){
+  mean(movies$vote_average[which((grepl(company,
+                 movies$production_companies, fixed = TRUE)))])
+  })
+
+## NUMBER OF MOVIES
+prodcos$n_movies <- sapply(prodcos$companies, FUN = function(company){
+  sum(grepl(company, movies$production_companies, fixed = TRUE))
+  })
+
+## AVERAGE REVENUE
+prodcos$avg_rev <- sapply(prodcos$companies, FUN = function(company){
+  mean(movies$revenue[which((grepl(company,
+                      movies$production_companies, fixed = TRUE)))])
+  })
+
+## AVERAGE BUDGET
+prodcos$avg_budget <- sapply(prodcos$companies, FUN = function(company){
+  mean(movies$budget[which((grepl(company,
+                      movies$production_companies, fixed = TRUE)))])
+  })
+
+prodcos_subset <- prodcos[order(prodcos$n_movies, prodcos$avg_rating, decreasing = TRUE),][9:47,]
+prodcos_subset <- prodcos_subset[which((prodcos_subset$companies == "Pictures" |
+                                 prodcos_subset$companies == "The" |
+                                 prodcos_subset$companies == "Studio " |
+                                 prodcos_subset$companies == "Walt Disney" |
+                                 prodcos_subset$companies == "Miramax Films" |
+                                 prodcos_subset$companies == "Sony Pictures" |
+                                 prodcos_subset$companies == "DreamWorks Animation" |
+                                 prodcos_subset$companies == "DreamWorks SKG"|
+                                 prodcos_subset$companies == "Revolution Sun Studios" |
+                                 prodcos_subset$companies == "Relativity Media") == FALSE),]
+
+## GRAPH
+ggplot(prodcos_subset, aes(x = reorder(companies, -avg_rating))) +
+
+  ##plotting
+  geom_point(aes(y = avg_rating, col = "Rating")) +
+  geom_segment(aes(x = companies, xend = companies, y = avg_rev, yend = avg_rating,
+                   col = "Rating"), lty = "dashed") +
+  geom_line(aes(y = avg_rev, col = "Revenue"), group = 1) +
+  geom_area(aes(y = avg_rev, fill = avg_rev), group = 1) +
+  geom_line(aes(y = avg_budget, col = "Budget"), group = 2) +
+
+  ##labeling
+  labs(x = "Production Companies", color = NULL) +
+  ggtitle("Average Rating, Revenue, and Budget Per Movie\nby Production Company") +
+
+  ## theme elements / labeling
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 55, hjust = 0.95, size = 8),
+        legend.position = "",
+        panel.border = element_blank()) +
+  scale_y_continuous(name = "Average Rating",
+                     sec.axis = sec_axis(~.*100,
+                                         name = "Average Box Office per Movie\n(in millions $)"),
+                     limits = c(0, 8))
+
+# RELEASE MONTH
+movies$release_month <- factor(movies$release_month, levels = c("January", "February", "March",
+                                  "April", "May", "June", "July",
+                                  "August", "September", "October",
+                                  "November", "December"))
+
+
+ggplot(movies, aes(fill = genres, x = release_month)) +
+  geom_bar(color = "black") +
+  ggtitle("Month of Movie Release by Genre") +
+  labs(x = "Month of Release", y = "Number of Movies") +
+
+  theme(axis.text.x = element_text(angle = 35, hjust = 0.95))
+```
+
+## PAIRS PLOT + SLR REGRESSION MODELS
+```{r, echo = FALSE}
+## PAIRWISE / PAIRS PLOT
+pairs(movies[, c("budget", "runtime", "vote_average", "vote_count", "revenue")])
+
+
+## SLR budget
+slr_budget <- lm(vote_average ~ budget, data = movies)
+summary(slr_budget)
+
+## SLR runtime
+slr_runtime <- lm(vote_average ~ runtime, data = movies)
+summary(slr_runtime)
+
+## SLR vote count
+slr_count <- lm(vote_average ~ vote_count, data = movies)
+summary(slr_count)
+```
+
+## CI INTERVALS FOR SLR MODELS
+```{r, echo = FALSE}
+n <- length(movies$vote_average)
+t <- qt(1-0.05/2, df = n-2)
+
+# First model: vote_average on budget
+slr_mod1 <- lm(vote_average~budget, data = movies)
+
+xbar1 <- mean(movies$budget)
+sxx1 <- sum((movies$budget-xbar1)^2)
+b01 <- slr_mod1$coefficients[1]
+b11 <- slr_mod1$coefficients[2]
+msres1 <- sum(slr_mod1$residuals^2)/(n-2)
+b0_se1 <-  sqrt(msres1 * ((1/n) + (xbar1^2/sxx1)))
+b1_se1 <- sqrt(msres1 / sxx1)
+
+# Regression coefficients CI
+b0_lower1 <- b01 - t*b0_se1
+b0_upper1 <- b01 + t*b0_se1
+b1_lower1 <- b11 - t*b1_se1
+b1_upper1 <- b11 + t*b1_se1
+
+x0_vec1 <- seq(min(movies$budget), max(movies$budget), length.out = 100)
+muy1 <- b01 + b11*x0_vec1
+vary1 <- msres1*((1/n)+((x0_vec1 - xbar1)^2/sxx1))
+vary01 <- msres1*(1+ (1/n)+((x0_vec1 - xbar1)^2/sxx1))
+
+# Mean response CI
+muy_LB1 <- muy1 - t*sqrt(vary1)
+muy_UB1 <- muy1 + t*sqrt(vary1)
+muy0_LB1 <- muy1 - t*sqrt(vary01)
+muy0_UB1 <- muy1 + t*sqrt(vary01)
+
+# Predicted response CI
+muybar1 <- b01 + b11*xbar1
+varybar1 <- msres1*(1/n)
+vary0bar1 <- msres1*(1 + 1/n)
+muybar1_LB <- muybar1 - t*sqrt(varybar1)
+muybar1_UB <- muybar1 + t*sqrt(varybar1)
+muy0bar1_LB <- muybar1 - t*sqrt(vary0bar1)
+muy0bar1_UB <- muybar1 + t*sqrt(vary0bar1)
+
+# Second model: vote_average on runtime
+slr_mod2 <- lm(vote_average~runtime, data = movies)
+xbar2 <- mean(movies$runtime)
+sxx2 <- sum((movies$runtime-xbar2)^2)
+b02 <- slr_mod2$coefficients[1]
+b12 <- slr_mod2$coefficients[2]
+msres2 <- sum(slr_mod2$residuals^2)/(n-2)
+b0_se2 <-  sqrt(msres2 * ((1/n) + (xbar2^2/sxx2)))
+b1_se2 <- sqrt(msres2 / sxx2)
+
+# Regression coefficients CI
+b0_lower2 <- b02 - t*b0_se2
+b0_upper2 <- b02 + t*b0_se2
+b1_lower2 <- b12 - t*b1_se2
+b1_upper2 <- b12 + t*b1_se2
+
+# Mean response CI
+muybar2 <- b02 + b12*xbar2
+varybar2 <- msres2*(1/n)
+vary0bar2 <- msres2*(1 + 1/n)
+
+muybar2_LB <- muybar2 - t*sqrt(varybar2)
+muybar2_UB <- muybar2 + t*sqrt(varybar2)
+muy0bar2_LB <- muybar2 - t*sqrt(vary0bar2)
+muy0bar2_UB <- muybar2 + t*sqrt(vary0bar2)
+
+# Predicted Interval CI
+x0_vec2 <- seq(min(movies$runtime), max(movies$runtime), length.out = 100)
+muy2 <- b02 + b12*x0_vec2
+vary2 <- msres2*((1/n)+((x0_vec2 - xbar2)^2/sxx2))
+vary02 <- msres2*(1+ (1/n)+((x0_vec2 - xbar2)^2/sxx2))
+
+muy_LB2 <- muy2 - t*sqrt(vary2)
+muy_UB2 <- muy2 + t*sqrt(vary2)
+muy0_LB2 <- muy2 - t*sqrt(vary02)
+muy0_UB2 <- muy2 + t*sqrt(vary02)
+
+# Model 3: vote average on vote count
+slr_mod3 <- lm(vote_average~vote_count, data = movies)
+xbar3 <- mean(movies$vote_count)
+sxx3 <- sum((movies$vote_count-xbar3)^2)
+b03 <- slr_mod3$coefficients[1]
+b13 <- slr_mod3$coefficients[2]
+msres3 <- sum(slr_mod3$residuals^2)/(n-2)
+b0_se3 <-  sqrt(msres3 * ((1/n) + (xbar3^2/sxx3)))
+b1_se3 <- sqrt(msres3 / sxx3)
+
+# Regression coefficients CI
+b0_lower3 <- b03 - t*b0_se3
+b0_upper3 <- b03 + t*b0_se3
+b1_lower3 <- b13 - t*b1_se3
+b1_upper3 <- b13 + t*b1_se3
+
+# Mean response CI
+muybar3 <- b03 + b13*xbar3
+varybar3 <- msres3*(1/n)
+vary0bar3 <- msres3*(1 + 1/n)
+muybar3_LB <- muybar3 - t*sqrt(varybar3)
+muybar3_UB <- muybar3 + t*sqrt(varybar3)
+muy0bar3_LB <- muybar3 - t*sqrt(vary0bar3)
+muy0bar3_UB <- muybar3 + t*sqrt(vary0bar3)
+
+# Predicted response CI
+x0_vec3 <- seq(min(movies$vote_count), max(movies$vote_count), length.out = 100)
+muy3 <- b03 + b13*x0_vec3
+vary3 <- msres3*((1/n)+((x0_vec3 - xbar3)^2/sxx3))
+vary03 <- msres3*(1+ (1/n)+((x0_vec3 - xbar3)^2/sxx3))
+
+muy_LB3 <- muy3- t*sqrt(vary3)
+muy_UB3 <- muy3 + t*sqrt(vary3)
+muy0_LB3 <- muy3 - t*sqrt(vary03)
+muy0_UB3 <- muy3 + t*sqrt(vary03)
+
+# Put CI into string format
+b01_CI <- paste("[", round(b0_lower1, 3), ", ", round(b0_upper1, 3), "]", sep = "")
+b11_CI <- paste("[", round(b1_lower1, 4), ", ", round(b1_upper1, 4), "]", sep = "")
+muybar1_CI <- paste("[", round(muybar1_LB, 2), ", ", round(muybar1_UB, 2), "]", sep = "")
+muy0bar1_CI <- paste("[", round(muy0bar1_LB, 2), ", ", round(muy0bar1_UB, 2), "]", sep = "")
+
+b02_CI <- paste("[", round(b0_lower2, 3), ", ", round(b0_upper2, 3), "]", sep = "")
+b12_CI <- paste("[", round(b1_lower2, 4), ", ", round(b1_upper2, 4), "]", sep = "")
+muybar2_CI <- paste("[", round(muybar2_LB, 2), ", ", round(muybar2_UB, 2), "]", sep = "")
+muy0bar2_CI <- paste("[", round(muy0bar2_LB, 2), ", ", round(muy0bar2_UB, 2), "]", sep = "")
+
+
+b03_CI <- paste("[", round(b0_lower3, 3), ", ", round(b0_upper3, 3), "]", sep = "")
+b13_CI <- paste("[", format(round(b1_lower3, 4), scientific = FALSE), ", ", format(round(b1_upper3, 4), scientific = FALSE), "]", sep = "")
+muybar3_CI <- paste("[", round(muybar3_LB, 2), ", ", round(muybar3_UB, 2), "]", sep = "")
+muy0bar3_CI <- paste("[", round(muy0bar3_LB, 2), ", ", round(muy0bar3_UB, 2), "]", sep = "")
+
+# Create data frame
+ci_data <- data.frame(Regressor = c("Budget", "Runtime", "Vote Count"),
+                      `B0_CI` = c(b01_CI, b02_CI, b03_CI),
+                      `B1_CI` = c(b11_CI, b12_CI, b13_CI),
+                      `Mean_Response_CI` = c(muybar1_CI, muybar2_CI, muybar3_CI),
+                      `Predicted_Response_CI`= c(muy0bar1_CI, muy0bar2_CI, muy0bar3_CI))
+
+# Create table
+#ci_data %>%
+ #  kbl(caption = "Confidence Intervals for Regression Coefficients, Mean Response, and Predicted Response") %>%
+  # kable_classic(full_width = F, html_font = "Cambria")
+```
+
+## PLOTTING MEAN RESPONSE + PREDICTED INTERVALS
+```{r, echo = FALSE}
+par(mfrow = c(1, 3))
+
+# Model 1: Vote average on budget
+plot(movies$budget, movies$vote_average, xlab = "Budget (in millions)", ylab = "Average Rating (0-10)", main = "Average Rating on Budget")
+abline(a = b01, b = b11, lwd = 2, col = "black")
+lines(x = x0_vec1, y = muy_LB1, lwd = 2, col = "red")
+lines(x = x0_vec1, y = muy_UB1, lwd = 2, col = "red")
+lines(x = x0_vec1, y = muy0_LB1, lwd = 2, col = "blue")
+lines(x = x0_vec1, y = muy0_UB1, lwd = 2, col = "blue")
+legend('bottomleft', legend = c("LS regression line", "95% confidence interval", "95% prediction interval"), col = c("black", "red", "blue"), lty = c(1, 1, 1), cex = 0.75)
+
+# Model 2: vote average on runtime
+plot(movies$runtime, movies$vote_average, xlab = "Runtime (minutes)", ylab = "Average Rating (0-10)", main = "Average Rating on Runtime")
+abline(a = b02, b = b12, lwd = 2, col = "black")
+lines(x = x0_vec2, y = muy_LB2, lwd = 2, col = "red")
+lines(x = x0_vec2, y = muy_UB2, lwd = 2, col = "red")
+lines(x = x0_vec2, y = muy0_LB2, lwd = 2, col = "blue")
+lines(x = x0_vec2, y = muy0_UB2, lwd = 2, col = "blue")
+legend('bottomleft', legend = c("LS regression line", "95% confidence interval", "95% prediction interval"), col = c("black", "red", "blue"), lty = c(1, 1, 1), cex = 0.75)
+
+# Model 3: vote average on vote count
+plot(movies$vote_count, movies$vote_average, xlab = "Vote Count", ylab = "Average Rating (0-10)", main = "Average Rating on Vote Count")
+abline(a = b03, b = b13, lwd = 2, col = "black")
+lines(x = x0_vec3, y = muy_LB3, lwd = 2, col = "red")
+lines(x = x0_vec3, y = muy_UB3, lwd = 2, col = "red")
+lines(x = x0_vec3, y = muy0_LB3, lwd = 2, col = "blue")
+lines(x = x0_vec3, y = muy0_UB3, lwd = 2, col = "blue")
+legend('bottomleft', legend = c("LS regression line", "95% confidence interval", "95% prediction interval"), col = c("black", "red", "blue"), lty = c(1, 1, 1), cex = 0.75)
+```
+
+## MLR QUANTITATIVE REGRESSION MODEL
+```{r, echo = FALSE}
+x_mat <- as.matrix(cbind(movies$budget, movies$revenue, movies$runtime, movies$vote_count,
+               movies$budget * movies$revenue))
+holding <- regsubsets(x_mat, movies$vote_average)
+rs <- summary(holding)
+
+## initializing table
+info_table <- matrix(NA, ncol = 6, nrow = 5, byrow = TRUE)
+colnames(info_table) <- c("Subset size", "Predictors",
+                          "R^2_adj", "AIC", "AICc", "BIC")
+info_table <- as.table(info_table)
+info_table[,1] <- 1:5
+info_table[,2] <- c("vote_count",
+                    "vote_count, budget",
+                    "vote_count, budget, runtime",
+                    "vote_count, budget, runtime, budget * revenue",
+                    "vote_count, budget, runtime, budget * revenue, revenue")
+info_table[,3] <- round(rs$adjr2, 3)
+
+
+## models
+om1 <- lm(vote_average ~ vote_count, data = movies)
+om2 <- lm(vote_average ~ vote_count + budget, data = movies)
+om3 <- lm(vote_average ~ vote_count + budget + runtime, data = movies)
+om4 <- lm(vote_average ~ vote_count + budget + runtime +
+            budget * revenue, data = movies)
+om5 <- lm(vote_average ~ vote_count + budget + runtime +
+            budget * revenue + revenue, data = movies)
+
+
+## om1 AIC / AICc / BIC
+n <- length(om1$residuals)
+npar <- length(om1$coefficients) + 1
+# AIC
+info_table[,4][1] <- extractAIC(om1, k=2)[2]
+# AICc
+info_table[,5][1] <- (extractAIC(om1, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][1] <- extractAIC(om1, k = log(n))[2]
+
+
+## om2 AIC / AICc / BIC
+npar <- length(om2$coefficients) + 1
+# AIC
+info_table[,4][2] <- extractAIC(om2, k=2)[2]
+# AICc
+info_table[,5][2] <- (extractAIC(om2, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][2] <- extractAIC(om2, k = log(n))[2]
+
+
+## om3 AIC / AICc / BIC
+npar <- length(om3$coefficients) + 1
+# AIC
+info_table[,4][3] <- extractAIC(om3, k=2)[2]
+# AICc
+info_table[,5][3] <- (extractAIC(om3, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][3] <- extractAIC(om3, k = log(n))[2]
+
+
+## om4 AIC / AICc / BIC
+npar <- length(om4$coefficients) + 1
+# AIC
+info_table[,4][4] <- extractAIC(om4, k=2)[2]
+# AIC_c
+info_table[,5][4] <- (extractAIC(om4, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][4] <- extractAIC(om4, k = log(n))[2]
+
+
+## om5 AIC / AICc / BIC
+npar <- length(om5$coefficients) + 1
+# AIC
+info_table[,4][5] <- extractAIC(om5, k=2)[2]
+# AICc
+info_table[,5][5] <- (extractAIC(om5, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][5] <- extractAIC(om5, k = log(n))[2]
+
+info_table[,4] <- round(as.numeric(info_table[,4]), 2)
+info_table[,5] <- round(as.numeric(info_table[,5]), 2)
+info_table[,6] <- round(as.numeric(info_table[,6]), 2)
+info_table
+
+
+info_table %>%
+  kbl() %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+## QUANTITATIVE MLR (STANDARDIZED)
+movies_scaled <- scale(movies[,c("vote_average", "vote_count", "budget", "runtime", "revenue")])
+test_model <- lm(vote_average ~ vote_count + budget + runtime + budget * revenue +
+                   revenue, data = as.data.frame(movies_scaled))
+
+
+# Summary of model coefficients
+test_model_sum <- as.data.frame(round(summary(test_model)$coefficients, 3))
+
+# Format into table
+test_model_sum %>%
+  kbl() %>%
+  kable_classic(full_width = F, html_font = "Cambria", "striped") %>%
+  row_spec(seq(1, nrow(test_model_sum), by = 2), background = "#C5E3F2")
+
+# Summary of anova test on model
+#quantanova <- round(anova(test_model), 3)
+
+# Format into table
+#quantanova %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, "striped", html_font = "Cambria") %>%
+  #row_spec(seq(1, nrow(quantanova), by = 2), background = "#E29CB4")
+
+
+```
+
+## QUANTITATIVE MLR MODEL RESIDUAL ANALYSIS
+```{r, echo = FALSE}
+# Quantitative Model Fitting
+model1 <- lm(vote_average~budget+revenue+runtime+vote_count, data = movies)
+
+n <- length(movies$budget)
+msres <- sum(model1$residuals^2)/(n-5) # calculate sigma2
+d <- model1$residuals/sqrt(msres) # calculate standardized residuals
+
+# Plot histogram of residuals
+hist(model1$residuals, breaks = 50, col = "lightblue3", xlab = "Residuals",
+     main = "Distribution of Residuals")
+
+# Plot residuals against fitted values
+plot(model1$fitted.values, model1$residuals, xlab = "Fitted Values", ylab = "Residuals")
+abline(a = 0, b = 0, col = "red")
+
+# QQ Plot of Residuals
+qqnorm(model1$residuals, main = "Normal QQ Plot of Residuals")
+qqline(model1$residuals, col = "blue")
+abline(a = 0, b = 1, col = 'red')
+
+# QQ Plot of Standardized Residuals
+qqnorm(d, main = "Normal QQ Plot of Standardized Residuals")
+qqline(d, col = "blue")
+abline(a = 0, b = 1, col = 'red')
+```
+
+##AIC/FORWARD SELECTION FOR FULL MODEL
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# Create matrix of all possible regressors
+x_mat <- as.matrix(cbind(movies$budget, movies$runtime, movies$vote_count, movies$revenue, movies$budget*movies$revenue, movies$act_adv, movies$adv_fant, movies$ani_fam, movies$crim_thr, movies$drama, movies$hist_drama, movies$horr_thrill, movies$myst_thrill, movies$rom_com, movies$sci_fi, movies$thrill_drama))
+holding <- regsubsets(x_mat, movies$vote_average, nvmax = 16)
+rs <- summary(holding)
+
+# Forward selection
+mint <- lm(vote_average~1, data = movies)
+forwardAIC <- step(mint, scope = list(lower=~1, upper = ~budget+runtime+vote_count+budget*revenue+act_adv+adv_fant+ani_fam+crim_thr+drama+hist_drama+horr_thrill+myst_thrill+rom_com+sci_fi+thrill_drama), 
+                   direction = "forward", data = movies)
+
+# Forward selection models
+om1 <- lm(vote_average ~ vote_count, data = movies)
+om2 <- lm(vote_average~vote_count+budget, data = movies)
+om3 <- lm(vote_average~vote_count+budget+runtime, data = movies)
+om4 <- lm(vote_average~vote_count+budget+runtime+ani_fam, data = movies)
+om5 <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama, data = movies)
+om6 <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr, data = movies)
+om7 <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr+horr_thrill, data = movies)
+om8 <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr+horr_thrill+revenue, data = movies)
+om9 <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr+horr_thrill+revenue+myst_thrill, data = movies)
+om10 <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr+horr_thrill+revenue+myst_thrill+budget*revenue, data = movies)
+
+# Create AIC table
+info_table <- matrix(NA, ncol = 6, nrow = 10, byrow = TRUE)
+colnames(info_table) <- c("Subset size", "Predictors",
+                          "R^2_adj", "AIC", "AICc", "BIC")
+info_table <- as.table(info_table)
+info_table[,1] <- 1:10
+info_table[,2] <- c("vote_count",
+                    "vote_count, budget",
+                    "vote_count, budget, runtime",
+                    "vote_count, budget, runtime, ani_fam",
+                    "vote_count, budget, runtime, ani_fam, drama",
+                    "vote_count, budget, runtime, ani_fam, drama, crim_thr",
+                    "vote_count, budget, runtime, ani_fam, drama, crim_thr,  horr_thrill",
+                    "vote_count, budget, runtime, ani_fam, drama, crim_thr, horr_thrill, revenue",
+                    "vote_count, budget, runtime, ani_fam, drama, crim_thr, horr_thrill, revenue, myst_thrill", 
+                    "vote_count, budget, runtime, ani_fam, drama, crim_thr, horr_thrill, revenue, myst_thrill, budget*revenue")
+info_table[,3] <- round(rs$adjr2, 3)[1:10] # input adjusted R^2 values 
+
+# om1 AIC, AICc, BIC
+n <- length(om1$residuals)
+npar <- length(om1$coefficients) + 1
+# AIC
+info_table[,4][1] <- extractAIC(om1, k=2)[2]
+# AICc
+info_table[,5][1] <- (extractAIC(om1, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][1] <- extractAIC(om1, k = log(n))[2]
+
+# om2 AIC, AICc, BIC
+npar <- length(om2$coefficients) + 1
+# AIC
+info_table[,4][2] <- extractAIC(om2, k=2)[2]
+# AICc
+info_table[,5][2] <- (extractAIC(om2, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][2] <- extractAIC(om2, k = log(n))[2]
+
+# om3 AIC, AICc, BIC
+npar <- length(om3$coefficients) + 1
+# AIC
+info_table[,4][3] <- extractAIC(om3, k=2)[2]
+# AICc
+info_table[,5][3] <- (extractAIC(om3, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][3] <- extractAIC(om3, k = log(n))[2]
+
+
+## om4 AIC, AICC, BIC
+npar <- length(om4$coefficients) + 1
+# AIC
+info_table[,4][4] <- extractAIC(om4, k=2)[2]
+# AIC_c
+info_table[,5][4] <- (extractAIC(om4, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][4] <- extractAIC(om4, k = log(n))[2]
+
+## om5 AIC, AICc, BIC
+npar <- length(om5$coefficients) + 1
+# AIC
+info_table[,4][5] <- extractAIC(om5, k=2)[2]
+# AICc
+info_table[,5][5] <- (extractAIC(om5, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][5] <- extractAIC(om5, k = log(n))[2]
+
+## om6 AIC, AICc, BIC
+npar <- length(om6$coefficients) + 1
+# AIC
+info_table[,4][6] <- extractAIC(om6, k=2)[2]
+# AICc
+info_table[,5][6] <- (extractAIC(om6, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][6] <- extractAIC(om6, k = log(n))[2]
+
+## om7 AIC, AICc, BIC
+npar <- length(om7$coefficients) + 1
+# AIC
+info_table[,4][7] <- extractAIC(om7, k=2)[2]
+# AICc
+info_table[,5][7] <- (extractAIC(om7, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][7] <- extractAIC(om7, k = log(n))[2]
+
+## om8 AIC, AICc, BIC
+npar <- length(om8$coefficients) + 1
+# AIC
+info_table[,4][8] <- extractAIC(om8, k=2)[2]
+# AICc
+info_table[,5][8] <- (extractAIC(om8, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][8] <- extractAIC(om8, k = log(n))[2]
+
+## om9 AIC, AICc, BIC
+npar <- length(om9$coefficients) + 1
+# AIC
+info_table[,4][9] <- extractAIC(om9, k=2)[2]
+# AICc
+info_table[,5][9] <- (extractAIC(om9, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][9] <- extractAIC(om9, k = log(n))[2]
+
+## om10 AIC, AICc, BIC
+npar <- length(om10$coefficients) + 1
+# AIC
+info_table[,4][10] <- extractAIC(om10, k=2)[2]
+# AICc
+info_table[,5][10] <- (extractAIC(om10, k=2) + 2 * npar * (npar + 1) / (n - npar - 1))[2]
+# BIC
+info_table[,6][10] <- extractAIC(om10, k = log(n))[2]
+
+info_table[,4] <- round(as.numeric(info_table[,4]), 2)
+info_table[,5] <- round(as.numeric(info_table[,5]), 2)
+info_table[,6] <- round(as.numeric(info_table[,6]), 2)
+
+#info_table %>%
+ #  kbl() %>%
+  # kable_classic(full_width = F, html_font = "Cambria")
+```
+
+## FULL MODEL SUMMARY
+```{r, echo = FALSE}
+# Summary of model coefficients
+om10sum <- as.data.frame(round(summary(om10)$coefficients, 3))
+
+# Format into table
+#om10sum %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, html_font = "Cambria", "striped") %>%
+  #row_spec(seq(1, 12, by = 2), background = "#C5E3F2")
+
+# Summary of anova test on model
+om10aov <- round(anova(om10), 3)
+
+# Format into table
+#om10aov %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, "striped", html_font = "Cambria") %>%
+  #row_spec(seq(1, 12, by = 2), background = "#E29CB4")
+```
+
+## REMOVING OUTLIERS
+```{r, echo = FALSE}
+residuals <- rstudent(om10) # studentized residuals
+outliers <- which(abs(residuals) >= 3) # indices of outliers
+
+colors <- ifelse(seq_along(om10$residuals) %in% outliers, "red", "black")
+
+# Plot residuals on fitted values
+plot(om10$fitted.values, om10$residuals, col = colors, xlab = "Fitted Values", ylab = "Residuals")
+points(om10$residuals[outliers] ~ om10$fitted.values[outliers], col = "red", pch = 16, cex = 1.5)
+abline(a = 0, b = 0, col = "blue")
+
+# Remove outliers from dataset
+movies1 <- movies[-outliers,]
+
+# Refit model
+om10new <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr+horr_thrill+revenue+myst_thrill+budget*revenue, data = movies1)
+
+# Display summary of refitted model
+om10newsum <- as.data.frame(round(summary(om10new)$coefficients, 3))
+#om10newsum %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, "striped", html_font = "Cambria") %>%
+  #row_spec(seq(1, 12, by = 2), background = "#C5E3F2")
+```
+
+## STANDARDIZING
+```{r, echo = FALSE}
+# Scale regressors and response variable
+movies_scaled <- 
+  scale(movies1[,c("vote_average", "vote_count", "budget", "runtime", "ani_fam", "drama", "crim_thr", "horr_thrill", "revenue", "myst_thrill")]) %>%
+  as.data.frame()
+
+# Fit model with standardized variables
+om10_scaled <- lm(vote_average~vote_count+budget+runtime+ani_fam+drama+crim_thr+horr_thrill+revenue+myst_thrill+budget*revenue, data = movies_scaled)
+summary(om10_scaled)
+
+om10_scaled_sum <- as.data.frame(round(summary(om10_scaled)$coefficients, 3))
+#om10_scaled_sum %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, "striped", html_font = "Cambria") %>%
+  #row_spec(seq(1, 12, by = 2), background = "#C5E3F2")
+```
+
+## CLEANING CREDITS
+```{r, echo = FALSE}
+## cleaning credits
+credits$cast <- clean_data(credits$cast)
+credits$cast <- gsub("cast_ , character: |gender: ,  , ", "", credits$cast)
+
+credits$crew <- clean_data(credits$crew)
+credits$crew <- gsub("department: |, gender: ,  , job: ", "", credits$crew)
+
+```
+
+## CAST / CREW
+```{r, echo = FALSE}
+oscar_winners <- read.csv("oscar_winners.csv")
+oscar_winners %>% relocate(person) %>%
+  select(-c(X_unit_id, X_last_judgment_at, birthplace.confidence,
+         date_of_birth.confidence, year_of_award.confidence,
+         sexual_orientation.confidence, religion.confidence,
+         race_ethnicity.confidence)) -> oscar_winners
+oscar_winners <- oscar_winners[oscar_winners$year_of_award >= 1990,]
+
+## obtaining most common winners
+names <- names(table(oscar_winners$person))
+names <- names[order(table(oscar_winners$person), decreasing = TRUE)]
+names_final <- c(names[c(3, 19, 24, 43, 69,
+                         85, 90, 101, 106)],
+                 "Robert Downey Jr", "Tom Cruise",
+                 "Christopher Nolan", "Quentin Tarantino",
+                 "Leonardo DiCaprio", "Jennifer Lawrence")
+
+
+## CATEGORICAL REGRESSORS BASED ON CAST/CREW OF CHOICE
+credits$tom_hanks <- ifelse(grepl("Tom Hanks", credits$cast) | grepl("Tom Hanks", credits$crew), 1, 0)
+credits$spielberg <- ifelse(grepl("Steven Spielberg", credits$crew) | grepl("Steven Spielberg", credits$cast), 1, 0)
+credits$anne_hathaway <- ifelse(grepl("Anne Hathaway", credits$cast) | grepl("Anne Hathaway", credits$crew), 1, 0)
+# credits$clooney <- ifelse(grepl("George Clooney", credits$cast), 1, 0)
+credits$julia_roberts <- ifelse(grepl("Julia Roberts", credits$cast) | grepl("Julia Roberts", credits$crew), 1, 0)
+credits$meryl_streep <- ifelse(grepl("Meryl Streep", credits$cast) | grepl("Meryl Streep", credits$crew), 1, 0)
+# credits$nat_portman <- ifelse(grepl("Natalie Portman", credits$cast), 1, 0)
+credits$robin_williams <- ifelse(grepl("Robin Williams", credits$cast) | grepl("Robin Williams", credits$crew), 1, 0)
+credits$sandra_bullock <- ifelse(grepl("Sandra Bullock", credits$cast) | grepl("Sandra Bullock", credits$crew), 1, 0)
+credits$rob_downey_jr <- ifelse(grepl("Robert Downey Jr", credits$cast) | grepl("Robert Downey Jr", credits$crew), 1, 0)
+credits$tom_cruise <- ifelse(grepl("Tom Cruise", credits$cast) | grepl("Tom Cruise", credits$crew), 1, 0)
+credits$nolan <- ifelse(grepl("Christopher Nolan", credits$crew) | grepl("Christopher Nolan", credits$cast), 1, 0)
+credits$tarantino <- ifelse(grepl("Quentin Tarantino", credits$crew) | grepl("Quentin Tarantino", credits$cast), 1, 0)
+credits$leo_dicaprio <- ifelse(grepl("Leonardo DiCaprio", credits$cast) | grepl("Leonardo DiCaprio", credits$crew), 1, 0)
+credits$jlaw <- ifelse(grepl("Jennifer Lawrence", credits$cast) | grepl("Jennifer Lawrence", credits$crew), 1, 0)
+# credits$viola_davis <- ifelse(grepl("Viola Davis", credits$cast) | grepl("Viola Davis", credits$crew), 1, 0)
+# credits$michelle_yeoh <- ifelse(grepl("Michelle Yeoh", credits$cast), 1, 0)
+# credits$chadwick_boseman <- ifelse(grepl("Chadwick Boseman", credits$cast) | grepl("Chadwick Boseman", credits$crew), 1, 0)
+credits$gal_gadot <- ifelse(grepl("Gal Gadot", credits$cast) | grepl("Gal Gadot", credits$crew), 1, 0)
+credits$michaelbjordan <- ifelse(grepl("Michael B. Jordan", credits$cast) | grepl("Michael B. Jordan", credits$crew), 1, 0)
+# credits$keke_palmer <- ifelse(grepl("Keke Palmer", credits$cast) | grepl("Keke Palmer", credits$crew), 1, 0)
+credits$chris_rock <- ifelse(grepl("Chris Rock", credits$cast) | grepl("Chris Rock", credits$crew), 1, 0)
+credits$adam_sandler <- ifelse(grepl("Adam Sandler", credits$cast) | grepl("Adam Sandler", credits$crew), 1, 0)
+credits$kevin_hart <- ifelse(grepl("Kevin Hart", credits$cast) | grepl("Kevin Hart", credits$crew), 1, 0)
+credits$therock <- ifelse(grepl("Dwayne Johnson", credits$cast) | grepl("Dwayne Johnson", credits$crew), 1, 0)
+# credits$lucy_liu <- ifelse(grepl("Lucy Liu", credits$cast) | grepl("Lucy Liu", credits$crew), 1, 0)
+credits$will_smith <- ifelse(grepl("Will Smith", credits$cast) | grepl("Will Smith", credits$crew), 1, 0)
+credits$anderson <- ifelse(grepl("Wes Anderson", credits$cast) | grepl("Wes Anderson", credits$crew), 1, 0)
+
+```
+
+
+## CAST / CREW REGRESSION
+```{r, echo = FALSE}
+credits <- rename(credits, id = movie_id)
+merged <- left_join(movies, credits, by = "id")
+
+cast_idx <- sapply(28:ncol(merged), FUN = function(col_num){
+  which(merged[,col_num] == 1)
+ 
+ 
+})
+
+cast_idx <- unlist(cast_idx)
+
+merged_subset <- merged[cast_idx,]
+merged_scaled <- scale(merged_subset[,c("vote_average", "tom_hanks", "spielberg",
+                                        "anne_hathaway",
+                                        "julia_roberts", "meryl_streep",
+                                        "robin_williams",
+                                        "sandra_bullock", "rob_downey_jr",
+                                        "tom_cruise", "nolan",
+                                        "tarantino", "leo_dicaprio",
+                                        "jlaw",
+                                        "gal_gadot", "michaelbjordan",
+                                        "chris_rock", "adam_sandler",
+                                        "kevin_hart", "therock",
+                                        "will_smith","anderson")])
+cast_model <- lm(vote_average ~ tom_hanks + spielberg + anne_hathaway +
+                   julia_roberts + meryl_streep + robin_williams +
+                   sandra_bullock + rob_downey_jr + tom_cruise + nolan +
+                   tarantino + leo_dicaprio + jlaw +
+                   gal_gadot + michaelbjordan +
+                   chris_rock +
+                   adam_sandler + kevin_hart + therock +
+                   will_smith + anderson, data = as.data.frame(merged_scaled))
+
+# Summary of model coefficients
+cast_model_sum <- as.data.frame(round(summary(cast_model)$coefficients, 3))
+
+# Format into table
+#cast_model_sum %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, html_font = "Cambria", "striped") %>%
+  #row_spec(seq(1, nrow(cast_model_sum), by = 2), background = "#C5E3F2")
+
+# Summary of anova test on model
+castanova <- round(anova(cast_model), 3)
+
+# Format into table
+#castanova %>%
+ # kbl() %>%
+  #kable_classic(full_width = F, "striped", html_font = "Cambria") %>%
+  #row_spec(seq(1, nrow(castanova), by = 2), background = "#E29CB4")
+```
